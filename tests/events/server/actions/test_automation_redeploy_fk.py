@@ -113,7 +113,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         ],
         id=uuid4(),
     ).receive()
-    async with triggers.consumer() as handle:
+    async with triggers.consumer(periodic_granularity=timedelta(seconds=60)) as handle:
         msg1 = Message(
             data=e1.model_dump_json().encode(),
             attributes={"id": str(e1.id), "event": e1.event},
@@ -154,7 +154,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         id=uuid4(),
     ).receive()
     with caplog.at_level(logging.ERROR):
-        async with triggers.consumer() as handle:
+        async with triggers.consumer(periodic_granularity=timedelta(seconds=60)) as handle:
             msg2 = Message(
                 data=e2.model_dump_json().encode(),
                 attributes={"id": str(e2.id), "event": e2.event},
@@ -176,7 +176,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
 
     # 4) Idempotency: sending the same message again should not create a new run
     with caplog.at_level(logging.ERROR):
-        async with triggers.consumer() as handle:
+        async with triggers.consumer(periodic_granularity=timedelta(seconds=60)) as handle:
             dupe = Message(
                 data=e2.model_dump_json().encode(),
                 attributes={"id": str(e2.id), "event": e2.event},
