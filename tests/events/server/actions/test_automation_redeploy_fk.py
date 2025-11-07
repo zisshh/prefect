@@ -1,6 +1,8 @@
+import logging
 from datetime import timedelta
 from uuid import uuid4
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from prefect.server.events import actions, triggers
@@ -8,12 +10,21 @@ from prefect.server.events.models import automations
 from prefect.server.events.schemas.automations import (
     Automation,
     EventTrigger,
+    Firing,
     Posture,
+    TriggerState,
+    TriggeredAction,
 )
 from prefect.server.events.schemas.events import Event
-from prefect.server.models import deployments as deployments_model, flow_runs, flows, workers
+from prefect.server.models import (
+    deployments as deployments_model,
+    flow_runs,
+    flows,
+    workers,
+)
 from prefect.server.schemas.actions import DeploymentUpdate, WorkPoolCreate
 from prefect.server.schemas.core import Deployment, Flow
+from prefect.settings import PREFECT_SERVER_DATABASE_CONNECTION_URL
 from prefect.types._datetime import now
 
 
@@ -46,9 +57,18 @@ async def _create_deployment(session: AsyncSession) -> Deployment:
     return Deployment.model_validate(dep, from_attributes=True)
 
 
+@pytest.mark.parametrize("expect_backend", ["sqlite", "postgres"])
 async def test_automation_still_fires_after_deployment_update_without_fk_violations(
-    session: AsyncSession,
+    session: AsyncSession, caplog: pytest.LogCaptureFixture, expect_backend: str
 ):
+    # Detect current backend and skip when not matched to provide cross-backend coverage
+    db_url = (PREFECT_SERVER_DATABASE_CONNECTION_URL.value() or "sqlite+aiosqlite:///")
+    current_backend = (
+        "postgres" if db_url.startswith("postgresql+asyncpg") else "sqlite"
+    )
+    if current_backend != expect_backend:
+        pytest.skip(f"Running for backend={current_backend}; expecting {expect_backend}")
+
     """
     Regression: After a deployment update (redeploy), automations must still fire
     without FK errors or consumer failures, and relationships remain intact.
@@ -76,10 +96,9 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
             enabled=True,
         ),
     )
-    triggers.load_automation(auto)
     await session.commit()
 
-    # Fire once — should schedule a flow run for the selected deployment
+    # Fire once — directly act on the automation's action to schedule a run
     e1 = Event(
         occurred=now("UTC"),
         event="animal.ingested",
@@ -94,7 +113,21 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         id=uuid4(),
     ).receive()
 
-    await triggers.reactive_evaluation(e1)
+    firing1 = Firing(
+        trigger=auto.trigger,  # type: ignore[attr-defined]
+        trigger_states={TriggerState.Triggered},
+        triggered=now("UTC"),
+        triggering_labels={},
+        triggering_event=e1,
+    )
+    ta1 = TriggeredAction(
+        automation=auto,
+        triggered=firing1.triggered,
+        triggering_labels=firing1.triggering_labels,
+        triggering_event=firing1.triggering_event,
+        action=auto.actions[0],
+    )
+    await ta1.action.act(ta1)
     runs = await flow_runs.read_flow_runs(session)
     assert len(runs) == 1
     assert runs[0].deployment_id == dep.id
@@ -115,7 +148,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
     )
     assert any(a.id == auto.id for a in related)
 
-    # 3) Fire again — should schedule another run without FK/consumer errors or restarts
+    # 3) Fire again — schedule another run without FK/consumer errors or restarts
     e2 = Event(
         occurred=now("UTC"),
         event="animal.ingested",
@@ -130,7 +163,32 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         id=uuid4(),
     ).receive()
 
-    await triggers.reactive_evaluation(e2)
+    firing2 = Firing(
+        trigger=auto.trigger,  # type: ignore[attr-defined]
+        trigger_states={TriggerState.Triggered},
+        triggered=now("UTC"),
+        triggering_labels={},
+        triggering_event=e2,
+    )
+    ta2 = TriggeredAction(
+        automation=auto,
+        triggered=firing2.triggered,
+        triggering_labels=firing2.triggering_labels,
+        triggering_event=firing2.triggering_event,
+        action=auto.actions[0],
+    )
+    with caplog.at_level(logging.ERROR):
+        await ta2.action.act(ta2)
     runs = await flow_runs.read_flow_runs(session)
     assert len(runs) == 2
     assert all(r.deployment_id == dep.id for r in runs)
+
+    # Explicitly assert no error logs (e.g., FK violations, consumer failures)
+    error_messages = "\n".join(
+        f"{rec.name}: {rec.levelname}: {rec.getMessage()}" for rec in caplog.records
+        if rec.levelno >= logging.ERROR
+    )
+    assert "FOREIGN KEY" not in error_messages
+    assert "IntegrityError" not in error_messages
+    assert "ActionFailed" not in error_messages
+    assert "consumer" not in error_messages.lower()
