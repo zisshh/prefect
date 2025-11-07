@@ -1,3 +1,26 @@
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 000000000..29548b7f3
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,17 @@
++#!/bin/bash
++set -euo pipefail
++
++case "${1:-}" in
++  base)
++    # Run a small subset of existing tests that should pass on the base commit
++    uv run pytest -q tests/events/server/triggers/test_basics.py
++    ;;
++  new)
++    # Run the newly added tests that are expected to fail on the base commit
++    uv run pytest -q tests/events/server/actions/test_automation_redeploy_fk.py
++    ;;
++  *)
++    echo "Usage: ./test.sh {base|new}" >&2
++    exit 1
++    ;;
++esac
 diff --git a/tests/events/server/actions/test_automation_redeploy_fk.py b/tests/events/server/actions/test_automation_redeploy_fk.py
 new file mode 100644
 index 000000000..ad38ccf4a
