@@ -1,0 +1,136 @@
+from datetime import timedelta
+from uuid import uuid4
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from prefect.server.events import actions, triggers
+from prefect.server.events.models import automations
+from prefect.server.events.schemas.automations import (
+    Automation,
+    EventTrigger,
+    Posture,
+)
+from prefect.server.events.schemas.events import Event
+from prefect.server.models import deployments as deployments_model, flow_runs, flows, workers
+from prefect.server.schemas.actions import DeploymentUpdate, WorkPoolCreate
+from prefect.server.schemas.core import Deployment, Flow
+from prefect.types._datetime import now
+
+
+async def _create_deployment(session: AsyncSession) -> Deployment:
+    """Helper: create a minimal deployment with a work pool/queue."""
+    wp = await workers.create_work_pool(
+        session=session,
+        work_pool=WorkPoolCreate(
+            name="wp-automations-fk",
+            type="None",
+            description="",
+            base_job_template={},
+        ),
+    )
+
+    test_flow = await flows.create_flow(session=session, flow=Flow(name="fk-flow"))
+    await session.flush()
+
+    dep = await deployments_model.create_deployment(
+        session=session,
+        deployment=Deployment(
+            name="fk-deployment",
+            flow_id=test_flow.id,
+            paused=False,
+            work_queue_id=wp.default_queue_id,
+        ),
+    )
+    assert dep is not None
+    await session.commit()
+    return Deployment.model_validate(dep, from_attributes=True)
+
+
+async def test_automation_still_fires_after_deployment_update_without_fk_violations(
+    session: AsyncSession,
+):
+    """
+    Regression: After a deployment update (redeploy), automations must still fire
+    without FK errors or consumer failures, and relationships remain intact.
+    """
+    # 1) Create deployment and an automation that runs it on a simple event
+    dep = await _create_deployment(session)
+
+    auto = await automations.create_automation(
+        session,
+        Automation(
+            name="fire-on-event",
+            trigger=EventTrigger(
+                expect={"animal.ingested"},
+                posture=Posture.Reactive,
+                threshold=0,
+                within=timedelta(seconds=30),
+            ),
+            actions=[
+                actions.RunDeployment(
+                    deployment_id=dep.id,
+                    parameters={"k": "v"},
+                    job_variables={"mode": "test"},
+                )
+            ],
+            enabled=True,
+        ),
+    )
+    triggers.load_automation(auto)
+    await session.commit()
+
+    # Fire once — should schedule a flow run for the selected deployment
+    e1 = Event(
+        occurred=now("UTC"),
+        event="animal.ingested",
+        resource={"prefect.resource.id": "some.resource"},
+        related=[
+            {
+                "prefect.resource.role": "meal",
+                "genus": "Hemerocallis",
+                "species": "fulva",
+            }
+        ],
+        id=uuid4(),
+    ).receive()
+
+    await triggers.reactive_evaluation(e1)
+    runs = await flow_runs.read_flow_runs(session)
+    assert len(runs) == 1
+    assert runs[0].deployment_id == dep.id
+
+    # 2) Update the deployment (simulate redeploy) — keep the same id but change fields
+    updated = await deployments_model.update_deployment(
+        session=session,
+        deployment_id=dep.id,
+        deployment=DeploymentUpdate(name="fk-deployment-updated"),
+    )
+    assert updated is True
+    await session.commit()
+
+    # Relationships must remain: the automation should still be related to the same deployment resource id
+    related = await automations.read_automations_related_to_resource(
+        session=session,
+        resource_id=f"prefect.deployment.{dep.id}",
+    )
+    assert any(a.id == auto.id for a in related)
+
+    # 3) Fire again — should schedule another run without FK/consumer errors or restarts
+    e2 = Event(
+        occurred=now("UTC"),
+        event="animal.ingested",
+        resource={"prefect.resource.id": "some.resource"},
+        related=[
+            {
+                "prefect.resource.role": "meal",
+                "genus": "Hemerocallis",
+                "species": "fulva",
+            }
+        ],
+        id=uuid4(),
+    ).receive()
+
+    await triggers.reactive_evaluation(e2)
+    runs = await flow_runs.read_flow_runs(session)
+    assert len(runs) == 2
+    assert all(r.deployment_id == dep.id for r in runs)

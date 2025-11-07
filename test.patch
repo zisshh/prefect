@@ -1,31 +1,32 @@
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..1111111
+index 000000000..29548b7f3
 --- /dev/null
 +++ b/test.sh
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,17 @@
 +#!/bin/bash
-+set -e
++set -euo pipefail
 +
-+case "$1" in
++case "${1:-}" in
 +  base)
++    # Run a small subset of existing tests that should pass on the base commit
 +    uv run pytest -q tests/events/server/triggers/test_basics.py
 +    ;;
 +  new)
++    # Run the newly added tests that are expected to fail on the base commit
 +    uv run pytest -q tests/events/server/actions/test_automation_redeploy_fk.py
 +    ;;
 +  *)
-+    echo "Usage: ./test.sh {base|new}"
++    echo "Usage: ./test.sh {base|new}" >&2
 +    exit 1
 +    ;;
 +esac
-
 diff --git a/tests/events/server/actions/test_automation_redeploy_fk.py b/tests/events/server/actions/test_automation_redeploy_fk.py
 new file mode 100644
-index 0000000..2222222
+index 000000000..65eb2f493
 --- /dev/null
 +++ b/tests/events/server/actions/test_automation_redeploy_fk.py
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,136 @@
 +from datetime import timedelta
 +from uuid import uuid4
 +
@@ -37,7 +38,6 @@ index 0000000..2222222
 +    Automation,
 +    EventTrigger,
 +    Posture,
-+    TriggerState,
 +)
 +from prefect.server.events.schemas.events import Event
 +from prefect.server.models import deployments as deployments_model, flow_runs, flows, workers
