@@ -24,6 +24,7 @@ from prefect.server.models import (
 )
 from prefect.server.schemas.actions import DeploymentUpdate, WorkPoolCreate
 from prefect.server.schemas.core import Deployment, Flow
+from prefect.server.utilities.messaging import Message
 from prefect.settings import PREFECT_SERVER_DATABASE_CONNECTION_URL
 from prefect.types._datetime import now
 
@@ -98,7 +99,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
     )
     await session.commit()
 
-    # Fire once — directly act on the automation's action to schedule a run
+    # Drive through consumer pipeline: publish event message via triggers.consumer
     e1 = Event(
         occurred=now("UTC"),
         event="animal.ingested",
@@ -112,22 +113,12 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         ],
         id=uuid4(),
     ).receive()
-
-    firing1 = Firing(
-        trigger=auto.trigger,  # type: ignore[attr-defined]
-        trigger_states={TriggerState.Triggered},
-        triggered=now("UTC"),
-        triggering_labels={},
-        triggering_event=e1,
-    )
-    ta1 = TriggeredAction(
-        automation=auto,
-        triggered=firing1.triggered,
-        triggering_labels=firing1.triggering_labels,
-        triggering_event=firing1.triggering_event,
-        action=auto.actions[0],
-    )
-    await ta1.action.act(ta1)
+    async with triggers.consumer() as handle:
+        msg1 = Message(
+            data=e1.model_dump_json().encode(),
+            attributes={"id": str(e1.id), "event": e1.event},
+        )
+        await handle(msg1)
     runs = await flow_runs.read_flow_runs(session)
     assert len(runs) == 1
     assert runs[0].deployment_id == dep.id
@@ -148,7 +139,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
     )
     assert any(a.id == auto.id for a in related)
 
-    # 3) Fire again — schedule another run without FK/consumer errors or restarts
+    # 3) Fire again via consumer — schedule another run without FK/consumer errors or restarts
     e2 = Event(
         occurred=now("UTC"),
         event="animal.ingested",
@@ -162,23 +153,13 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         ],
         id=uuid4(),
     ).receive()
-
-    firing2 = Firing(
-        trigger=auto.trigger,  # type: ignore[attr-defined]
-        trigger_states={TriggerState.Triggered},
-        triggered=now("UTC"),
-        triggering_labels={},
-        triggering_event=e2,
-    )
-    ta2 = TriggeredAction(
-        automation=auto,
-        triggered=firing2.triggered,
-        triggering_labels=firing2.triggering_labels,
-        triggering_event=firing2.triggering_event,
-        action=auto.actions[0],
-    )
     with caplog.at_level(logging.ERROR):
-        await ta2.action.act(ta2)
+        async with triggers.consumer() as handle:
+            msg2 = Message(
+                data=e2.model_dump_json().encode(),
+                attributes={"id": str(e2.id), "event": e2.event},
+            )
+            await handle(msg2)
     runs = await flow_runs.read_flow_runs(session)
     assert len(runs) == 2
     assert all(r.deployment_id == dep.id for r in runs)
@@ -192,3 +173,14 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
     assert "IntegrityError" not in error_messages
     assert "ActionFailed" not in error_messages
     assert "consumer" not in error_messages.lower()
+
+    # 4) Idempotency: sending the same message again should not create a new run
+    with caplog.at_level(logging.ERROR):
+        async with triggers.consumer() as handle:
+            dupe = Message(
+                data=e2.model_dump_json().encode(),
+                attributes={"id": str(e2.id), "event": e2.event},
+            )
+            await handle(dupe)
+    runs_after_dupe = await flow_runs.read_flow_runs(session)
+    assert len(runs_after_dupe) == 2
