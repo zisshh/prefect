@@ -1,14 +1,3 @@
-From c5f6f28f82cba0f53637633f1ce6f8448138ba4d Mon Sep 17 00:00:00 2001
-From: Thakur Divyansh <thakur.divyansh2022@vitstudent.ac.in>
-Date: Sat, 8 Nov 2025 19:56:04 +0530
-Subject: [PATCH] events/triggers: execute actions inline after publishing to
- ensure correctness in single-process setups; record idempotency
- (Droid-assisted)
-
----
- src/prefect/server/events/triggers.py | 18 +++++++++++++++++-
- 1 file changed, 17 insertions(+), 1 deletion(-)
-
 diff --git a/src/prefect/server/events/triggers.py b/src/prefect/server/events/triggers.py
 index a5006bbaa..f710054d6 100644
 --- a/src/prefect/server/events/triggers.py
@@ -49,6 +38,3 @@ index a5006bbaa..f710054d6 100644
  
  __events_clock_lock: Optional[asyncio.Lock] = None
  _events_clock: Optional[float] = None
--- 
-2.51.0
-
