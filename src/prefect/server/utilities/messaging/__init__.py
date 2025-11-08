@@ -29,16 +29,16 @@ logger: "logging.Logger" = get_logger(__name__)
 M = TypeVar("M", bound="Message", covariant=True)
 
 
-class Message(Protocol):
-    """
-    A protocol representing a message sent to a message broker.
+@dataclass
+class Message:
+    """A concrete, minimal message type with data and attributes.
+
+    This replaces the previous Protocol to allow simple instantiation in tests
+    and in-memory brokers while preserving the expected interface.
     """
 
-    @property
-    def data(self) -> Union[str, bytes]: ...
-
-    @property
-    def attributes(self) -> Mapping[str, Any]: ...
+    data: Union[str, bytes]
+    attributes: Mapping[str, Any]
 
 
 class Cache(abc.ABC):

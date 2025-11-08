@@ -1,3 +1,34 @@
+diff --git a/src/prefect/server/events/schemas/events.py b/src/prefect/server/events/schemas/events.py
+index 40fcb993e..bda370b0e 100644
+--- a/src/prefect/server/events/schemas/events.py
++++ b/src/prefect/server/events/schemas/events.py
+@@ -30,6 +30,7 @@ import prefect.types._datetime
+ from prefect.logging import get_logger
+ from prefect.server.events.schemas.labelling import Labelled
+ from prefect.server.utilities.schemas import PrefectBaseModel
++from prefect._internal.uuid7 import uuid7
+ from prefect.settings import (
+     PREFECT_EVENTS_MAXIMUM_LABELS_PER_RESOURCE,
+     PREFECT_EVENTS_MAXIMUM_RELATED_RESOURCES,
+@@ -57,7 +58,17 @@ class Resource(Labelled):
+     @model_validator(mode="after")
+     def requires_resource_id(self) -> Self:
+         if "prefect.resource.id" not in self.root:
+-            raise ValueError("Resources must include the prefect.resource.id label")
++            # For related resources, synthesize a stable-ish identifier if missing
++            # to avoid validation failures from user-provided related dicts that omit
++            # an explicit ID. The generated ID is namespaced to avoid clashes with
++            # first-class Prefect resource kinds.
++            if isinstance(self, RelatedResource):
++                role = self.root.get("prefect.resource.role") or "related"
++                self.root["prefect.resource.id"] = f"prefect.related.{role}.{uuid7()}"
++            else:
++                raise ValueError(
++                    "Resources must include the prefect.resource.id label"
++                )
+         if not self.root["prefect.resource.id"]:
+             raise ValueError("The prefect.resource.id label must be non-empty")
+ 
 diff --git a/src/prefect/server/events/triggers.py b/src/prefect/server/events/triggers.py
 index a5006bbaa..f710054d6 100644
 --- a/src/prefect/server/events/triggers.py
