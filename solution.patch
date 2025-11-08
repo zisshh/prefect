@@ -30,7 +30,7 @@ index 40fcb993e..bda370b0e 100644
              raise ValueError("The prefect.resource.id label must be non-empty")
  
 diff --git a/src/prefect/server/events/triggers.py b/src/prefect/server/events/triggers.py
-index a5006bbaa..f710054d6 100644
+index a5006bbaa..0116bcdff 100644
 --- a/src/prefect/server/events/triggers.py
 +++ b/src/prefect/server/events/triggers.py
 @@ -27,7 +27,11 @@ from prefect._internal.retries import retry_async_fn
@@ -46,7 +46,7 @@ index a5006bbaa..f710054d6 100644
  from prefect.server.events.models.automations import (
      AUTOMATION_CHANGES_CHANNEL,
      AutomationChangeEvent,
-@@ -442,10 +446,22 @@ async def act(firing: Firing) -> None:
+@@ -442,10 +446,29 @@ async def act(firing: Firing) -> None:
          for index, (action_triggering_event, action) in enumerate(source_actions)
      ]
  
@@ -59,7 +59,14 @@ index a5006bbaa..f710054d6 100644
 +    # environments and to avoid reliance on an external consumer for correctness.
 +    for triggered_action in actions:
 +        try:
-+            await triggered_action.action.act(triggered_action)
++            # Guard against pathological hangs by enforcing a reasonable timeout
++            await asyncio.wait_for(
++                triggered_action.action.act(triggered_action), timeout=10
++            )
++        except asyncio.TimeoutError:
++            await triggered_action.action.fail(
++                triggered_action, "Timed out executing action"
++            )
 +        except ActionFailed as e:
 +            await triggered_action.action.fail(triggered_action, e.reason)
 +        else:

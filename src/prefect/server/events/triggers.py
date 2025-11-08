@@ -27,11 +27,8 @@ from prefect._internal.retries import retry_async_fn
 from prefect.logging import get_logger
 from prefect.server.database import PrefectDBInterface, db_injector
 from prefect.server.events import messaging
-from prefect.server.events.actions import (
-    ServerActionTypes,
-    ActionFailed,
-    record_action_happening,
-)
+from prefect.server.events.actions import ServerActionTypes
+from prefect.server.events import actions as actions_service
 from prefect.server.events.models.automations import (
     AUTOMATION_CHANGES_CHANNEL,
     AutomationChangeEvent,
@@ -60,7 +57,11 @@ from prefect.server.events.schemas.automations import (
     TriggerState,
 )
 from prefect.server.events.schemas.events import ReceivedEvent
-from prefect.server.utilities.messaging import Message, MessageHandler
+from prefect.server.utilities.messaging import (
+    Message,
+    MessageHandler,
+    create_consumer as create_messaging_consumer,
+)
 from prefect.server.utilities.postgres_listener import (
     get_pg_notify_connection,
     pg_listen,
@@ -451,23 +452,8 @@ async def act(firing: Firing) -> None:
         for action in actions:
             await publisher.publish_data(action.model_dump_json().encode(), {})
 
-    # Execute actions inline as well to ensure timely execution in single-process
-    # environments and to avoid reliance on an external consumer for correctness.
-    for triggered_action in actions:
-        try:
-            # Guard against pathological hangs by enforcing a reasonable timeout
-            await asyncio.wait_for(
-                triggered_action.action.act(triggered_action), timeout=10
-            )
-        except asyncio.TimeoutError:
-            await triggered_action.action.fail(
-                triggered_action, "Timed out executing action"
-            )
-        except ActionFailed as e:
-            await triggered_action.action.fail(triggered_action, e.reason)
-        else:
-            await triggered_action.action.succeed(triggered_action)
-            await record_action_happening(triggered_action.id)
+    # Do not execute actions inline here. Actions are processed by the actions
+    # service consumer which we start within the triggers consumer context.
 
 
 __events_clock_lock: Optional[asyncio.Lock] = None
@@ -1136,6 +1122,11 @@ async def consumer(
 
     ordering = get_triggers_causal_ordering()
 
+    # Start the actions consumer in the background so that triggered actions are
+    # processed asynchronously via the message bus, avoiding DB lock contention.
+    actions_consumer = create_messaging_consumer("actions")
+    actions_task: asyncio.Task | None = None
+
     async def message_handler(message: Message):
         if not message.data:
             logger.warning("Message had no data")
@@ -1171,7 +1162,15 @@ async def consumer(
 
     try:
         logger.debug("Starting reactive evaluation task")
-        yield message_handler
+        async with actions_service.consumer() as handler:
+            actions_task = asyncio.create_task(actions_consumer.run(handler))
+            try:
+                yield message_handler
+            finally:
+                if actions_task:
+                    actions_task.cancel()
+                    await asyncio.gather(actions_task, return_exceptions=True)
+                await actions_consumer.cleanup()
     finally:
         sync_task.cancel()
         proactive_task.cancel()
