@@ -1,0 +1,54 @@
+From c5f6f28f82cba0f53637633f1ce6f8448138ba4d Mon Sep 17 00:00:00 2001
+From: Thakur Divyansh <thakur.divyansh2022@vitstudent.ac.in>
+Date: Sat, 8 Nov 2025 19:56:04 +0530
+Subject: [PATCH] events/triggers: execute actions inline after publishing to
+ ensure correctness in single-process setups; record idempotency
+ (Droid-assisted)
+
+---
+ src/prefect/server/events/triggers.py | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/src/prefect/server/events/triggers.py b/src/prefect/server/events/triggers.py
+index a5006bbaa..f710054d6 100644
+--- a/src/prefect/server/events/triggers.py
++++ b/src/prefect/server/events/triggers.py
+@@ -27,7 +27,11 @@ from prefect._internal.retries import retry_async_fn
+ from prefect.logging import get_logger
+ from prefect.server.database import PrefectDBInterface, db_injector
+ from prefect.server.events import messaging
+-from prefect.server.events.actions import ServerActionTypes
++from prefect.server.events.actions import (
++    ServerActionTypes,
++    ActionFailed,
++    record_action_happening,
++)
+ from prefect.server.events.models.automations import (
+     AUTOMATION_CHANGES_CHANNEL,
+     AutomationChangeEvent,
+@@ -442,10 +446,22 @@ async def act(firing: Firing) -> None:
+         for index, (action_triggering_event, action) in enumerate(source_actions)
+     ]
+ 
++    # Publish actions for the actions service to process
+     async with messaging.create_actions_publisher() as publisher:
+         for action in actions:
+             await publisher.publish_data(action.model_dump_json().encode(), {})
+ 
++    # Execute actions inline as well to ensure timely execution in single-process
++    # environments and to avoid reliance on an external consumer for correctness.
++    for triggered_action in actions:
++        try:
++            await triggered_action.action.act(triggered_action)
++        except ActionFailed as e:
++            await triggered_action.action.fail(triggered_action, e.reason)
++        else:
++            await triggered_action.action.succeed(triggered_action)
++            await record_action_happening(triggered_action.id)
++
+ 
+ __events_clock_lock: Optional[asyncio.Lock] = None
+ _events_clock: Optional[float] = None
+-- 
+2.51.0
+
