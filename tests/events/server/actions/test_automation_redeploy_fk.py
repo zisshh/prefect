@@ -106,6 +106,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         resource={"prefect.resource.id": "some.resource"},
         related=[
             {
+                "prefect.resource.id": "meal.hemerocallis.fulva",
                 "prefect.resource.role": "meal",
                 "genus": "Hemerocallis",
                 "species": "fulva",
@@ -146,6 +147,7 @@ async def test_automation_still_fires_after_deployment_update_without_fk_violati
         resource={"prefect.resource.id": "some.resource"},
         related=[
             {
+                "prefect.resource.id": "meal.hemerocallis.fulva",
                 "prefect.resource.role": "meal",
                 "genus": "Hemerocallis",
                 "species": "fulva",
