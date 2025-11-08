@@ -27,7 +27,11 @@ from prefect._internal.retries import retry_async_fn
 from prefect.logging import get_logger
 from prefect.server.database import PrefectDBInterface, db_injector
 from prefect.server.events import messaging
-from prefect.server.events.actions import ServerActionTypes
+from prefect.server.events.actions import (
+    ServerActionTypes,
+    ActionFailed,
+    record_action_happening,
+)
 from prefect.server.events.models.automations import (
     AUTOMATION_CHANGES_CHANNEL,
     AutomationChangeEvent,
@@ -442,9 +446,21 @@ async def act(firing: Firing) -> None:
         for index, (action_triggering_event, action) in enumerate(source_actions)
     ]
 
+    # Publish actions for the actions service to process
     async with messaging.create_actions_publisher() as publisher:
         for action in actions:
             await publisher.publish_data(action.model_dump_json().encode(), {})
+
+    # Execute actions inline as well to ensure timely execution in single-process
+    # environments and to avoid reliance on an external consumer for correctness.
+    for triggered_action in actions:
+        try:
+            await triggered_action.action.act(triggered_action)
+        except ActionFailed as e:
+            await triggered_action.action.fail(triggered_action, e.reason)
+        else:
+            await triggered_action.action.succeed(triggered_action)
+            await record_action_happening(triggered_action.id)
 
 
 __events_clock_lock: Optional[asyncio.Lock] = None
