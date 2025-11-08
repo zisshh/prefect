@@ -69,3 +69,32 @@ index a5006bbaa..f710054d6 100644
  
  __events_clock_lock: Optional[asyncio.Lock] = None
  _events_clock: Optional[float] = None
+diff --git a/src/prefect/server/utilities/messaging/__init__.py b/src/prefect/server/utilities/messaging/__init__.py
+index 1a593adfc..c8468b9da 100644
+--- a/src/prefect/server/utilities/messaging/__init__.py
++++ b/src/prefect/server/utilities/messaging/__init__.py
+@@ -29,16 +29,16 @@ logger: "logging.Logger" = get_logger(__name__)
+ M = TypeVar("M", bound="Message", covariant=True)
+ 
+ 
+-class Message(Protocol):
+-    """
+-    A protocol representing a message sent to a message broker.
+-    """
++@dataclass
++class Message:
++    """A concrete, minimal message type with data and attributes.
+ 
+-    @property
+-    def data(self) -> Union[str, bytes]: ...
++    This replaces the previous Protocol to allow simple instantiation in tests
++    and in-memory brokers while preserving the expected interface.
++    """
+ 
+-    @property
+-    def attributes(self) -> Mapping[str, Any]: ...
++    data: Union[str, bytes]
++    attributes: Mapping[str, Any]
+ 
+ 
+ class Cache(abc.ABC):

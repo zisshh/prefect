@@ -455,7 +455,14 @@ async def act(firing: Firing) -> None:
     # environments and to avoid reliance on an external consumer for correctness.
     for triggered_action in actions:
         try:
-            await triggered_action.action.act(triggered_action)
+            # Guard against pathological hangs by enforcing a reasonable timeout
+            await asyncio.wait_for(
+                triggered_action.action.act(triggered_action), timeout=10
+            )
+        except asyncio.TimeoutError:
+            await triggered_action.action.fail(
+                triggered_action, "Timed out executing action"
+            )
         except ActionFailed as e:
             await triggered_action.action.fail(triggered_action, e.reason)
         else:
